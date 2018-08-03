@@ -6,56 +6,47 @@ Created on Tue Mar 08 15:50:22 2016
 
 Notes/To-do:
         
-    Straighten out the relationship between ModernGL and the rest of OpenGL
-        Plus figure out how to tell the difference between fixed and dynamic
+    Improve efficiency. Numpy cross products in particular are expensive.
             
 """
+
+
 import Physics
 import Solver
-import Vector
 import Level
 import Collisions
-import Search
 import numpy as np
-import math
 import struct
-from scipy.integrate import ode
-import copy as cp
-import time
 import pybullet as pyb
-#import sys
-
 import os
 import pyglet as pyg
 import pyglet.window.key as key
 import ModernGL as mgl
 from ModernGL.ext.obj import Obj
-from PIL import Image
 from pyrr import Matrix44
-#from PyQt5 import QtGui, QtWidgets, QtCore, QtOpenGL
-#from AppFramework import runApp, AppParent
-
 
 currentWorkingDirectory = os.getcwd()
 imagesDirectory = currentWorkingDirectory + '\\images\\'
 objDirectory = currentWorkingDirectory + '\\objects\\'
 
 # Choose levelNumber
-levelNumber = 9
+levelNumber = 10
 
 # Choose Framerate
-fps = 240
+fps = 120
+
+speedMultiplier = 1/250
 
 class App(object):
     """ Do the thing.
     """
     def __init__(self):
-#        
+        
         self.initializePyglet()
         self.initializeModernGL()
         self.initializeSimulation()
         self.pressAndReleaseHandler() #for keys that are pressed/released
-
+        
     def initializePyglet(self):
         """Open a window, initialize pushed key handler.
         """
@@ -72,7 +63,7 @@ class App(object):
         self.ctx = mgl.create_context()
             
         self.prog = self.ctx.program(
-            vertex_shader=('''
+                vertex_shader = '''
                 #version 330
                 
                 uniform mat4 Mvp;
@@ -120,8 +111,8 @@ class App(object):
                     out_texindex = int(texindex);
 
                 }
-            '''),
-            fragment_shader=('''
+            ''',
+            fragment_shader = '''
                 #version 330
                 uniform sampler2D textures[2];
                 //uniform vec3 Light;
@@ -142,7 +133,7 @@ class App(object):
                     //f_color = vec4(base * 0.1 + tex.rgb * lum + spec, tex.a);
                     f_color = vec4(tex.rgb, tex.a);
                 }
-            '''),
+            ''',
         )
         
         # Assign self.mvp to the uniform Mvp in the modernGL program
@@ -176,8 +167,8 @@ class App(object):
 
         # Connect all of the buffers to a vertex array object which will be in
         # charge of rendering.
-        vao_content = [(cubeVertBuffer, '3f 2f', 'in_vert_c', 'in_text_c'),
-                       (sphereVertBuffer, '3f 2f', 'in_vert_s', 'in_text_s'),
+        vao_content = [(cubeVertBuffer,    '3f 2f', 'in_vert_c', 'in_text_c'),
+                       (sphereVertBuffer,  '3f 2f', 'in_vert_s', 'in_text_s'),
                        (self.entityBuffer, '3f 9f 3f 1f 1i/i', 'in_pos',
                             'in_rotMat', 'in_size', 'texindex', 'shape'),]
 
@@ -207,7 +198,7 @@ class App(object):
         # Miscellaneous bits
 
         # Determines how quickly the simulation runs. Larger means bigger jumps.
-        self.stepsize=.0005
+        self.speedMultiplier=speedMultiplier
         self.nextTime = 0
                 
         self.currentTime=0
@@ -220,7 +211,12 @@ class App(object):
         self.box = box
         
         # Initialize simulation shtuff
-        self.physics=Physics.newtonian(self.listOfEntities)
+        self.physics = Physics.nBodyRotation(self.listOfEntities)
+#        self.physics = Physics.newtonian(self.listOfEntities)
+        
+        # Choose a solver. The SciPy one is more accurate but can occasionally
+        # hang if it doesn't converge to a sufficiently low error. They seem
+        # to run at roughly equal speeds.
 #        solver = Solver.RK45_SciPy(self.physics.diffEq)
         solver = Solver.RK4(self.physics.diffEq)
         self.physics.solver = solver
@@ -246,110 +242,51 @@ class App(object):
             self.a = None
             self.f = None
 
-#        search = 'newton' # 'newton', 'bisect', or 'golden'
-#        self.colHandler = Collisions.CollisionHandler(self.listOfEntities, search, l,r,t,b,f,a,g)
-        self.colHandler = Collisions.CollisionHandlerRepulsion(self.listOfEntities, l,r,t,b,f,a,g)
-                
+        # Search is not yet truly implemented
+        search = 'newton' # 'newton', 'bisect', or 'golden'
+        
+        # Currently testing out two different styles of collision handling
+        self.colHandler = Collisions.CollisionHandler(self.listOfEntities, search, l,r,t,b,f,a,g)
+#        self.colHandler = Collisions.CollisionHandlerRepulsion(self.listOfEntities, l,r,t,b,f,a,g)
+        
+        # Calculate center of mass. I don't think this is being used currently
+        #, but it could be used to keep the camera focused on the center of mass.
         self.com = self.calcPosCoM()
 
     def pressAndReleaseHandler(self):
         """ Processes all user inputs.
-        """
-        ship = self.listOfEntities[0] # This gets used a lot
-        
-        # Process events
-        
+        """        
             # Check for buttons that have been pressed
         def on_key_press(symbol, modifier):
 
             # '+' and '-' on the key pad speed up or slow down simulation
             if symbol == key.NUM_ADD:
-                self.stepsize *= 2
+                self.speedMultiplier *= 2
             elif symbol == key.NUM_SUBTRACT:
-                self.stepsize *= 0.5
-            # '<' and '>' slow and speed up your thruster respectively
-            elif symbol == key.PERIOD:
-                ship.thrust *=1.5
-            elif symbol == key.COMMA:
-                ship.thrust *=.75
-            # Up arrow gives thrust, plays sound, changes sprite
-            elif symbol == key.UP:
-                ship.image=self.rot_center(self.rocketOnImageOrig,
-                                           ship.angle)
-                self.thrusting=True
-            # Spacebar activates press plays sound and changes crosshairs
-            elif symbol == key.SPACE:
-                self.drainSound.play()
-                self.listOfEntities[-1].image=self.redCrosshairs
+                self.speedMultiplier *= 0.5
 
             # Check for buttons that have been released
         def on_key_release(symbol, modifier):
-            # Releasing up arrow returns sprites and sounds to normal
-            if symbol == key.UP:
-                ship.image=self.rot_center(
-                    self.rocketImageOrig,ship.angle)
-                self.thrusting=False
+            pass
                 
         self.wnd.push_handlers(on_key_press,on_key_release)
                 
     def heldKeyHandler(self):
         """ Process held buttons; currently doesn't do much
         """
-        
-        ship = self.listOfEntities[0] # This gets used a lot
-
-        # Left arrow rotates ship CCW
-        if self.held[key.LEFT]:
-            if self.thrusting: # Determine which image to rotate
-                img=self.rocketOnImageOrig
-            else: img=self.rocketImageOrig
-            ship.angle+=5 # Increase rotation by 5 degrees
-            ship.angle%=360 # Check if divisible by 360
-            # Rotate image about its center (doesn't actually work 100%)
-            ship.image=self.rot_center(img,ship.angle)
-        # Right arrow does all the same in the opposite direction
-        if self.held[key.RIGHT]:
-            if self.thrusting:
-                img=self.rocketOnImageOrig
-            else: img=self.rocketImageOrig
-            ship.angle-=5
-            ship.angle%=360
-            ship.image=self.rot_center(img,ship.angle)
-        # Adds thrust in the appropriate amount on the appropriate axes
-        if self.held[key.UP]:
-            yvel=-np.cos(ship.angle*2*np.pi/360)*ship.thrust
-            xvel=np.sin(ship.angle*2*np.pi/360)*ship.thrust
-            self.model.bodies[0].velocity.y -=yvel
-            self.model.bodies[0].velocity.x -=xvel
-        # Down arrow gives a small amount of reverse thrust
-        if self.held[key.DOWN]:
-            yvel=-np.cos(ship.angle*2*np.pi/360)*ship.thrust/4.
-            xvel=np.sin(ship.angle*2*np.pi/360)*ship.thrust/4.
-            self.model.bodies[0].velocity.y +=yvel
-            self.model.bodies[0].velocity.x +=xvel
+        pass
 
     def update(self, dt, *args, **kwargs):
-#    def render(self):
         """ The foundation for running the animation and simulation. Gets called
         by the pyglet application framework.
         """
-#        dt=1/fps
         self.currentTime += dt
-        
-        # Keep a copy in case of penetration
-#        backupEntities = cp.deepcopy(self.listOfEntities)
-        
-        # Advance a step. self.currentTime is returned as self.currentTime + self.stepsize
-#        print("nextTime = " + str(self.nextTime))
-        nSteps = 25
-        for i in range(nSteps):
-            self.physics.advance(self.stepsize/nSteps)
-    #        print("currentTime = " + str(self.currentTime))
-    #        self.colHandler.checkCollisionsPybullet()
-            self.colHandler.checkCollisions()
-#        step = self.stepsize
-#        i = 0
-        
+        stepsize = dt*self.speedMultiplier
+
+        self.physics.advance(stepsize)
+        self.colHandler.checkCollisionsPybullet()
+#        self.colHandler.checkCollisions()
+
 #        while self.colHandler.checkCollisions() is True:
 #        if self.colHandler.checkColPybNoPenetration() is True:
             
@@ -381,7 +318,7 @@ class App(object):
 
 #         Update the display
         
-        width, height = (1280, 720)
+        width, height = (self.wnd.width, self.wnd.height)
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.clear(1.0, 1.0, 1.0)
         self.ctx.enable_only(mgl.DEPTH_TEST | mgl.BLEND)
@@ -418,8 +355,6 @@ class App(object):
 #        self.mug_texture.use()
         self.vao.render(vertices = len(self.sphereobj.vert)*5, instances=len(self.listOfEntities)) # mgl.TRIANGLE_STRIP
 
-#def render(self):
-#    self.update(1/fps)
 #============================================================================#
 
 class SimEntity(object):
@@ -433,8 +368,11 @@ class SimEntity(object):
     body: instance of RigidBody
         Contains information like the mass, moment of inertia, orientation, etc.
     imageIndex: int
-        
-        
+        In Level, we specify which image is which with an index.
+    entityType: string
+        Either "ball" or "box." Determines how collisions are handled.
+    size: float
+        The radius or half-extents of the object in screen coordinates.
     
     """
     def __init__(self, body, imageIndex, entityType, size):
@@ -446,13 +384,13 @@ class SimEntity(object):
         
         if entityType is 'box':
             self.boundRadius = np.linalg.norm(np.array(size))
-            self.entTypeInt = 0
+            self.entTypeInt = 0 # the shaders can't handle strings
         elif entityType is 'ball':
             self.boundRadius = max(size)
             self.entTypeInt = 1
         
-        self.accVector = Vector.Quaternion(0, np.array([0,0,0]))
-        self.rotAccVector = Vector.Quaternion(0, np.array([0,0,0]))
+#        self.accVector = Vector.Quaternion(0, np.array([0,0,0]))
+#        self.rotAccVector = Vector.Quaternion(0, np.array([0,0,0]))
 
         # Default assumptions
         self.angle    = body.q.Zangle
@@ -503,5 +441,4 @@ if __name__=='__main__':
     pyg.clock.unschedule(myApp.update)
     pyb.disconnect()
     pyg.app.exit()
-#    app, wnd = runApp(App)
-#    sys.exit(app.exec_())
+    
